@@ -17,17 +17,34 @@ This is a work in progress -- it is not yet feature complete. Current features:
 
 * Starting face can be selected or randomly chosen; some produce better results than others.
 
+* Optional trapezoidal glue tabs are emitted on one side of each cut seam,
+with a mountain-fold score across the tab base (`--tabs`).
+
+* Tiny or thin triangles can be collapsed so they appear as gaps instead of
+distorting the layout (`--min-area`, `--min-edge`).
+
 * `stl-convert` script can convert OpenSCAD ASCII STL files into binary STL files for `unfold` to process.
+
+Usage:
+
+```
+unfold [options] < file.stl > file.svg
+
+  -p, --poly N             use face N as the starting polygon (else random)
+  -l, --labels             draw paired hex labels on cut seams / tabs
+  -a, --min-area A         drop triangles with area < A
+  -e, --min-edge E         drop triangles with any edge shorter than E
+  -t, --tabs               add glue tabs on cut edges
+  -T, --tab-height H       tab height in model units (default 2.0)
+  -B, --tab-base-frac F    tab base inset as fraction of edge (default 0.2)
+  -v, --verbose            debug output
+```
 
 Among the features that it could use:
 
 * A better heuristic for finding the maximum non-overlaping set of triangles
 (Currently breadth-first search is used, with a slight preference for coplanar
 triangles)
-
-* Tabs for securing parts together.
-
-* Collapsing of very small or very thin triangles.
 
 ![Wireframed dodecahedron](https://farm8.staticflickr.com/7320/16181756310_729bb6e186_z.jpg)
 
