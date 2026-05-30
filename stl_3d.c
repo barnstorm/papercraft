@@ -4,8 +4,33 @@
 #include <stdint.h>
 #include <unistd.h>
 
+#if defined(_WIN32) || defined(__MINGW32__) || defined(__MINGW64__)
+#include <io.h>
+#include <fcntl.h>
+#endif
 
 static const int debug = 0;
+
+/*
+ * read() may return fewer bytes than requested (e.g. when reading from a
+ * pipe). Loop until the full buffer is filled or we hit EOF / error.
+ */
+static ssize_t
+read_full(int fd, void *buf, size_t len)
+{
+	char *p = buf;
+	size_t got = 0;
+	while (got < len)
+	{
+		ssize_t n = read(fd, p + got, len - got);
+		if (n == 0)
+			break;
+		if (n < 0)
+			return n;
+		got += (size_t) n;
+	}
+	return (ssize_t) got;
+}
 
 typedef struct
 {
@@ -173,7 +198,12 @@ stl_3d_parse(
 	ssize_t rc;
 	stl_3d_file_header_t hdr;
 
-	rc = read(fd, &hdr, sizeof(hdr));
+#if defined(_WIN32) || defined(__MINGW32__) || defined(__MINGW64__)
+	/* Ensure binary mode so reads aren't mangled by CRLF translation. */
+	_setmode(fd, _O_BINARY);
+#endif
+
+	rc = read_full(fd, &hdr, sizeof(hdr));
 	if (rc != sizeof(hdr))
 		return NULL;
 
@@ -184,7 +214,7 @@ stl_3d_parse(
 	const size_t file_len = num_triangles * sizeof(*fts);
  	fts = calloc(1, file_len);
 
-	rc = read(fd, fts, file_len);
+	rc = read_full(fd, fts, file_len);
 	if (rc < 0 || (size_t) rc != file_len)
 		return NULL;
 

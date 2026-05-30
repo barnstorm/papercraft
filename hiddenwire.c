@@ -20,6 +20,11 @@ static int debug = 0;
 #include "camera.h"
 #include "svg.h"
 
+#if defined(_WIN32) || defined(__MINGW32__) || defined(__MINGW64__)
+#include <io.h>
+#include <fcntl.h>
+#endif
+
 
 static const char usage[] =
 "Usage: hiddenwire [options] file.stl > file.svg\n"
@@ -221,6 +226,10 @@ int main(
 	const size_t max_len = 32 << 20;
 	uint8_t * const buf = calloc(max_len, 1);
 	size_t offset = 0;
+
+#if defined(_WIN32) || defined(__MINGW32__) || defined(__MINGW64__)
+	_setmode(0, _O_BINARY);
+#endif
 
 	while(1)
 	{

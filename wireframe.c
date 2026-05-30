@@ -12,6 +12,11 @@
 #include <assert.h>
 #include "v3.h"
 
+#if defined(_WIN32) || defined(__MINGW32__) || defined(__MINGW64__)
+#include <io.h>
+#include <fcntl.h>
+#endif
+
 #ifndef M_PI
 #define 	M_PI   3.1415926535897932384
 #endif
@@ -215,9 +220,20 @@ int main(void)
 	const size_t max_len = 1 << 20;
 	uint8_t * const buf = calloc(max_len, 1);
 
-	ssize_t rc = read(0, buf, max_len);
-	if (rc == -1)
-		return EXIT_FAILURE;
+#if defined(_WIN32) || defined(__MINGW32__) || defined(__MINGW64__)
+	_setmode(0, _O_BINARY);
+#endif
+
+	size_t total = 0;
+	while (total < max_len)
+	{
+		ssize_t rc = read(0, buf + total, max_len - total);
+		if (rc == 0)
+			break;
+		if (rc < 0)
+			return EXIT_FAILURE;
+		total += (size_t) rc;
+	}
 
 	const stl_header_t * const hdr = (const void*) buf;
 	const stl_face_t * const stl_faces = (const void*)(hdr+1);

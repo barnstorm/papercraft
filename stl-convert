@@ -4,9 +4,14 @@ use warnings;
 use strict;
 use Data::Dumper;
 
+binmode STDIN;
+binmode STDOUT;
+
 undef $/;
 
 local $_ = <>;
+# Normalize CRLF/CR line endings so regex anchors work cross-platform
+s/\r\n?/\n/g;
 
 my ($name) = /^solid (.*?)$/msg;
 

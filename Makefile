@@ -4,6 +4,7 @@ CFLAGS = \
 	-O3 \
 	-W \
 	-Wall \
+	-I. \
 	-Wp,-MMD,$(dir $@).$(notdir $@).d \
 	-Wp,-MT,$@ \
 

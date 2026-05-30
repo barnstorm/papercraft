@@ -139,7 +139,10 @@ main(
 	 	input_fd= STDIN_FILENO;
 		input_file = "stdin";
 	} else {
-		input_fd = open(input_file, O_RDONLY);
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+		input_fd = open(input_file, O_RDONLY | O_BINARY);
 		if (input_fd < 0)
 		{
 			perror(input_file);

@@ -10,7 +10,16 @@
 #include <math.h>
 #include <err.h>
 #include <assert.h>
+#include <getopt.h>
 #include "v3.h"
+
+#if defined(_WIN32) || defined(__MINGW32__) || defined(__MINGW64__)
+#include <io.h>
+#include <fcntl.h>
+/* mingw/msys2 lack srand48/lrand48 — fall back to rand(). */
+#define srand48(s) srand((unsigned)(s))
+#define lrand48()  ((long)rand())
+#endif
 
 #ifndef M_PI
 #define 	M_PI   3.1415926535897932384
@@ -18,6 +27,11 @@
 
 static int debug = 0;
 static int draw_labels = 0;
+static float min_area = 0;     /* triangles with area < min_area get collapsed */
+static float min_edge = 0;     /* triangles with any edge < min_edge get collapsed */
+static int draw_tabs = 0;      /* add glue tabs on cut edges */
+static float tab_height = 2.0; /* tab extends this far perpendicular to the cut edge */
+static float tab_base_frac = 0.2;  /* fraction of edge used as inset on each end of the tab base */
 
 typedef struct
 {
@@ -46,6 +60,7 @@ struct face
 	int next_edge[3];
 	int coplanar[3];
 	int used;
+	int collapsed;   /* dropped via --min-area / --min-edge */
 };
 
 // once this triangle has been used, it will be placed
@@ -495,6 +510,101 @@ svg_text(
 	printf("</text></g>\n");
 }
 
+/* Emit a trapezoidal glue tab on the outward side of (p1, p2).
+ * The tab replaces the simple cut line: we still cut the original edge
+ * but pop the middle portion out as a flap that can be glued to the
+ * matching face on the other side of the mesh seam.
+ *
+ * Outward direction is chosen by flipping a 90° rotation of the edge
+ * so it points away from the triangle centroid.
+ */
+static void
+draw_tab(
+	const float p1[2],
+	const float p2[2],
+	const float centroid[2],
+	unsigned int label,
+	int do_label
+)
+{
+	const float dx = p2[0] - p1[0];
+	const float dy = p2[1] - p1[1];
+	const float L = sqrtf(dx*dx + dy*dy);
+
+	/* if the edge is too short for a meaningful tab, fall back to a plain cut */
+	if (L < 2 * tab_height + 1e-3f)
+	{
+		svg_line("#FF0000", p1, p2, 0);
+		if (do_label)
+		{
+			const float cx = (p1[0] + p2[0]) / 2;
+			const float cy = (p1[1] + p2[1]) / 2;
+			const float angle = atan2f(dy, dx) * 180 / M_PI;
+			svg_text(cx, cy, angle, "%04x", label);
+		}
+		return;
+	}
+
+	const float ex = dx / L;
+	const float ey = dy / L;
+
+	/* outward unit normal — flip so it points away from the triangle centroid */
+	float nx =  ey;
+	float ny = -ex;
+	const float mx = (p1[0] + p2[0]) / 2;
+	const float my = (p1[1] + p2[1]) / 2;
+	if (nx * (centroid[0] - mx) + ny * (centroid[1] - my) > 0)
+	{
+		nx = -nx;
+		ny = -ny;
+	}
+
+	float inset = tab_base_frac * L;
+	const float base_len_min = 2 * tab_height + 0.5f;
+	if (L - 2 * inset < base_len_min)
+		inset = (L - base_len_min) / 2;
+	if (inset < 0)
+		inset = 0;
+
+	const float base_start[2] = { p1[0] + inset * ex, p1[1] + inset * ey };
+	const float base_end[2]   = { p2[0] - inset * ex, p2[1] - inset * ey };
+	const float base_len = L - 2 * inset;
+
+	float bevel = tab_height;
+	if (bevel > base_len * 0.5f - 0.1f)
+		bevel = base_len * 0.5f - 0.1f;
+	if (bevel < 0)
+		bevel = 0;
+
+	const float top_start[2] = {
+		base_start[0] + tab_height * nx + bevel * ex,
+		base_start[1] + tab_height * ny + bevel * ey,
+	};
+	const float top_end[2] = {
+		base_end[0]   + tab_height * nx - bevel * ex,
+		base_end[1]   + tab_height * ny - bevel * ey,
+	};
+
+	svg_line("#FF0000", p1, base_start, 0);
+	svg_line("#FF0000", base_start, top_start, 0);
+	svg_line("#FF0000", top_start, top_end, 0);
+	svg_line("#FF0000", top_end, base_end, 0);
+	svg_line("#FF0000", base_end, p2, 0);
+
+	// the base of the tab is a mountain fold (solid score line) — the
+	// tab folds away from the paper to tuck behind the matching face.
+	svg_line("#00FF00", base_start, base_end, 0);
+
+	if (do_label)
+	{
+		const float lx = (top_start[0] + top_end[0]) / 2;
+		const float ly = (top_start[1] + top_end[1]) / 2;
+		const float angle = atan2f(dy, dx) * 180 / M_PI;
+		svg_text(lx, ly, angle, "%04x", label);
+	}
+}
+
+
 void
 poly_print(
 	poly_t * const g
@@ -530,7 +640,7 @@ printf("<g><!-- %p %d %f %f->%p %f->%p %f->%p -->\n",
 
 		if (!next)
 		{
-			// draw a cut line
+			// draw a cut line (with an optional glue tab on one side)
 			const float * const p1 = g->p[i];
 			const float * const p2 = g->p[(i+1) % 3];
 			const float cx = (p2[0] + p1[0]) / 2;
@@ -539,17 +649,34 @@ printf("<g><!-- %p %d %f %f->%p %f->%p %f->%p -->\n",
 			const float dy = (p2[1] - p1[1]);
 			const float angle = atan2(dy, dx) * 180 / M_PI;
 
-			svg_line("#FF0000", p1, p2, 0);
-			cut_lines++;
+			// pair label = min(this face addr, neighbor face addr).
+			// guarantees both halves of the seam share an identifier.
+			uintptr_t a2 = (0x7FFFF & (uintptr_t) f->next[edge]) >> 3;
+			const unsigned int label = (unsigned int)((a2 > a1) ? a1 : a2);
 
-			// use the lower address as the label
-			if (draw_labels)
+			// pick which side hosts the tab so each seam gets exactly one.
+			// collapsed neighbors have no matching slot — skip the tab there.
+			int tab_here = 0;
+			if (draw_tabs
+			&&  f->next[edge]
+			&&  !f->next[edge]->collapsed)
+				tab_here = ((uintptr_t) f) < ((uintptr_t) f->next[edge]);
+
+			if (tab_here)
 			{
-				uintptr_t a2 = (0x7FFFF & (uintptr_t) f->next[edge]) >> 3;
-				if (a2 > a1)
-					a2 = a1;
-				svg_text(cx, cy, angle, "%04x", a2);
+				const float centroid[2] = {
+					(g->p[0][0] + g->p[1][0] + g->p[2][0]) / 3,
+					(g->p[0][1] + g->p[1][1] + g->p[2][1]) / 3,
+				};
+				draw_tab(p1, p2, centroid, label, draw_labels);
 			}
+			else
+			{
+				svg_line("#FF0000", p1, p2, 0);
+				if (draw_labels)
+					svg_text(cx, cy, angle, "%04x", label);
+			}
+			cut_lines++;
 
 			continue;
 		}
@@ -708,18 +835,120 @@ stl2faces(
 		return NULL;
 	}
 
+	// flag tiny/thin triangles so the unfold treats them as gaps. The
+	// graph stays intact (their neighbors still link to them), but they
+	// are pre-marked `used` so poly_build skips them and neighbors see
+	// a cut edge in their place.
+	if (min_area > 0 || min_edge > 0)
+	{
+		int collapsed_count = 0;
+		for (int i = 0 ; i < num_triangles ; i++)
+		{
+			face_t * const f = &faces[i];
+			const float a = f->sides[0];
+			const float b = f->sides[1];
+			const float c = f->sides[2];
+
+			int drop = 0;
+			if (min_edge > 0 && (a < min_edge || b < min_edge || c < min_edge))
+				drop = 1;
+			if (!drop && min_area > 0)
+			{
+				const float s = (a + b + c) / 2;
+				const float a2 = s * (s-a) * (s-b) * (s-c);
+				const float area = a2 > 0 ? sqrtf(a2) : 0;
+				if (area < min_area)
+					drop = 1;
+			}
+
+			if (drop)
+			{
+				f->collapsed = 1;
+				f->used = 1;
+				collapsed_count++;
+			}
+		}
+		fprintf(stderr, "collapsed %d/%d triangles (min_area=%g min_edge=%g)\n",
+			collapsed_count, num_triangles, min_area, min_edge);
+	}
+
 	return faces;
 }
 
 
-int main(void)
+static const struct option long_options[] = {
+	{ "help",          no_argument,       0, 'h' },
+	{ "verbose",       no_argument,       0, 'v' },
+	{ "labels",        no_argument,       0, 'l' },
+	{ "poly",          required_argument, 0, 'p' },
+	{ "min-area",      required_argument, 0, 'a' },
+	{ "min-edge",      required_argument, 0, 'e' },
+	{ "tabs",          no_argument,       0, 't' },
+	{ "tab-height",    required_argument, 0, 'T' },
+	{ "tab-base-frac", required_argument, 0, 'B' },
+	{ 0, 0, 0, 0 },
+};
+
+static const char usage[] =
+"Usage: unfold [options] < file.stl > file.svg\n"
+"\n"
+" -h | --help               Show this help\n"
+" -v | --verbose            Enable debug output\n"
+" -l | --labels             Draw edge-matching labels\n"
+" -p | --poly N             Use face N as the starting polygon\n"
+" -a | --min-area A         Drop triangles with area < A\n"
+" -e | --min-edge E         Drop triangles with any edge shorter than E\n"
+" -t | --tabs               Add glue tabs on cut edges\n"
+" -T | --tab-height H       Tab height in model units (default 2.0)\n"
+" -B | --tab-base-frac F    Tab base inset as fraction of edge (default 0.2)\n"
+"\n"
+"The POLY environment variable is honored if --poly is not given.\n";
+
+int main(int argc, char ** argv)
 {
+	int starting_poly = -1;
+
+	while (1)
+	{
+		const int c = getopt_long(argc, argv, "h?vlp:a:e:tT:B:", long_options, NULL);
+		if (c == -1)
+			break;
+		switch (c)
+		{
+		case 'h': case '?':
+			fputs(usage, stdout);
+			return EXIT_SUCCESS;
+		case 'v': debug++; break;
+		case 'l': draw_labels = 1; break;
+		case 'p': starting_poly = atoi(optarg); break;
+		case 'a': min_area = atof(optarg); break;
+		case 'e': min_edge = atof(optarg); break;
+		case 't': draw_tabs = 1; break;
+		case 'T': tab_height = atof(optarg); break;
+		case 'B': tab_base_frac = atof(optarg); break;
+		default:
+			fputs(usage, stderr);
+			return EXIT_FAILURE;
+		}
+	}
+
 	const size_t max_len = 1 << 20;
 	uint8_t * const buf = calloc(max_len, 1);
 
-	ssize_t rc = read(0, buf, max_len);
-	if (rc == -1)
-		return EXIT_FAILURE;
+#if defined(_WIN32) || defined(__MINGW32__) || defined(__MINGW64__)
+	_setmode(0, _O_BINARY);
+#endif
+
+	size_t total = 0;
+	while (total < max_len)
+	{
+		ssize_t rc = read(0, buf + total, max_len - total);
+		if (rc == 0)
+			break;
+		if (rc < 0)
+			return EXIT_FAILURE;
+		total += (size_t) rc;
+	}
 
 	const stl_header_t * const hdr = (const void*) buf;
 	const stl_face_t * const stl_faces = (const void*)(hdr+1);
@@ -729,11 +958,13 @@ int main(void)
 	fprintf(stderr, "num: %d\n", num_triangles);
 
 	face_t * const faces = stl2faces(stl_faces, num_triangles);
+	if (!faces)
+		return EXIT_FAILURE;
 
 	// we now have a graph that shows the connection between
 	// all of the faces and their sizes. start trying to build
 	// non-overlapping groups of them
-	
+
 	printf("<svg xmlns=\"http://www.w3.org/2000/svg\">\n");
 	poly_t origin = { };
 
@@ -745,7 +976,9 @@ int main(void)
 	int offset;
 
 	const char * const poly_offset = getenv("POLY");
-	if (poly_offset)
+	if (starting_poly >= 0)
+		offset = starting_poly;
+	else if (poly_offset)
 		offset = atoi(poly_offset);
 	else
 		offset = lrand48();
